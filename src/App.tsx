@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { iniciarLoginGoogle, intercambiarCodigoPorToken, decodificarToken } from './auth';
+import { decodificarToken } from './auth';
 import './App.css';
 
 const ALB_HOST = 'http://nexo-alb-326907716.us-east-1.elb.amazonaws.com';
@@ -180,6 +180,10 @@ function App() {
   const [cargandoAuth, setCargandoAuth] = useState(true);
   const [esAdmin, setEsAdmin] = useState(false);
   const [nombreUsuario, setNombreUsuario] = useState<string | null>(null);
+  const [emailLogin, setEmailLogin] = useState('');
+  const [passwordLogin, setPasswordLogin] = useState('');
+  const [errorLogin, setErrorLogin] = useState('');
+  const [cargandoLogin, setCargandoLogin] = useState(false);
   const [vista, setVista] = useState<'tiendas' | 'cuentas' | 'conductores' | 'calificaciones' | 'estadisticas'>('estadisticas');
 
   const [tiendas, setTiendas] = useState<Tienda[]>([]);
@@ -215,22 +219,7 @@ function App() {
   const [estadoEstadisticas, setEstadoEstadisticas] = useState('');
 
   useEffect(() => {
-    const procesarLogin = async () => {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get('code');
-
-      if (code && !sessionStorage.getItem('code_procesado')) {
-        sessionStorage.setItem('code_procesado', code);
-        const nuevoToken = await intercambiarCodigoPorToken(code);
-        if (nuevoToken) {
-          sessionStorage.setItem('nexo_admin_token', nuevoToken);
-          setToken(nuevoToken);
-        }
-        window.history.replaceState({}, '', '/');
-      }
-      setCargandoAuth(false);
-    };
-    procesarLogin();
+    setCargandoAuth(false);
   }, []);
 
   useEffect(() => {
@@ -260,9 +249,36 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, esAdmin]);
 
+  const iniciarSesion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorLogin('');
+    setCargandoLogin(true);
+
+    try {
+      const res = await fetch(`${API_USERS}/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailLogin, password: passwordLogin }),
+      });
+
+      if (!res.ok) {
+        setErrorLogin('Email o contraseña incorrectos.');
+        setCargandoLogin(false);
+        return;
+      }
+
+      const data = await res.json();
+      sessionStorage.setItem('nexo_admin_token', data.idToken);
+      setToken(data.idToken);
+    } catch {
+      setErrorLogin('No se pudo conectar con el servidor.');
+    } finally {
+      setCargandoLogin(false);
+    }
+  };
+
   const cerrarSesion = () => {
     sessionStorage.removeItem('nexo_admin_token');
-    sessionStorage.removeItem('code_procesado');
     setToken(null);
     setEsAdmin(false);
   };
@@ -313,7 +329,7 @@ function App() {
       const duenos = await cargarUsuariosPorIds(data.map((t) => t.ownerId));
       setDuenosTiendas(duenos);
     } catch {
-      setEstadoTiendas('No se pudo conectar con ms-stores. ¿Está corriendo en el puerto 8082?');
+      setEstadoTiendas('No se pudo conectar con ms-stores.');
     }
   };
 
@@ -383,7 +399,7 @@ function App() {
       setUsuarios(await res.json());
       setEstadoUsuarios('');
     } catch {
-      setEstadoUsuarios('No se pudo conectar con ms-users. ¿Está corriendo en el puerto 8081?');
+      setEstadoUsuarios('No se pudo conectar con ms-users.');
     }
   };
 
@@ -435,7 +451,7 @@ function App() {
       const usuariosMap = await cargarUsuariosPorIds(data.map((c) => c.usuarioId));
       setUsuariosConductores(usuariosMap);
     } catch {
-      setEstadoConductores('No se pudo conectar con ms-users. ¿Está corriendo en el puerto 8081?');
+      setEstadoConductores('No se pudo conectar con ms-users.');
     }
   };
 
@@ -517,7 +533,7 @@ function App() {
       setEstadisticas(await res.json());
       setEstadoEstadisticas('');
     } catch {
-      setEstadoEstadisticas('No se pudo conectar con ms-orders. ¿Está corriendo en el puerto 8084?');
+      setEstadoEstadisticas('No se pudo conectar con ms-orders.');
     }
   };
 
@@ -531,9 +547,28 @@ function App() {
         <img src="/logonexo.jpg" alt="NEXO" className="logo-login" />
         <h1>NEXO</h1>
         <p className="sub">Panel de administración</p>
-        <button className="btn-primario" onClick={iniciarLoginGoogle}>
-          Iniciar sesión con Google
-        </button>
+        <form onSubmit={iniciarSesion} style={{ width: '100%', maxWidth: 320, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <input
+            type="email"
+            placeholder="Email"
+            value={emailLogin}
+            onChange={(e) => setEmailLogin(e.target.value)}
+            required
+            className="busqueda"
+          />
+          <input
+            type="password"
+            placeholder="Contraseña"
+            value={passwordLogin}
+            onChange={(e) => setPasswordLogin(e.target.value)}
+            required
+            className="busqueda"
+          />
+          {errorLogin && <p style={{ color: '#c0392b', fontSize: 13, margin: 0 }}>{errorLogin}</p>}
+          <button className="btn-primario" type="submit" disabled={cargandoLogin}>
+            {cargandoLogin ? 'Ingresando...' : 'Iniciar sesión'}
+          </button>
+        </form>
       </div>
     );
   }
