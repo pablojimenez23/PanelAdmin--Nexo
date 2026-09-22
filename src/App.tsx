@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { iniciarLoginGoogle, intercambiarCodigoPorToken, decodificarToken } from './auth';
 import './App.css';
 
-const API_STORES = 'http://localhost:8082';
-const API_USERS = 'http://localhost:8081';
-const API_ORDERS = 'http://localhost:8084';
+const ALB_HOST = 'http://nexo-alb-326907716.us-east-1.elb.amazonaws.com';
+const API_STORES = `${ALB_HOST}/stores`;
+const API_USERS = ALB_HOST;
+const API_ORDERS = `${ALB_HOST}/orders`;
 
 type Tienda = {
   id: string;
