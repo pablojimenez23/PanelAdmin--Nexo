@@ -226,16 +226,7 @@ function App() {
     if (token) {
       const payload = decodificarToken(token);
       setEsAdmin((payload['cognito:groups'] || []).includes('ADMIN'));
-
-      fetch(`${API_USERS}/usuarios/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data?.nombre) setNombreUsuario(data.nombre);
-          else setNombreUsuario(payload['email'] || null);
-        })
-        .catch(() => setNombreUsuario(payload['email'] || null));
+      setNombreUsuario(payload['name'] || payload['email'] || null);
     }
   }, [token]);
 
@@ -281,6 +272,7 @@ function App() {
     sessionStorage.removeItem('nexo_admin_token');
     setToken(null);
     setEsAdmin(false);
+    setNombreUsuario(null);
   };
 
   const cargarUsuariosPorIds = async (ids: string[]): Promise<Record<string, Usuario>> => {
