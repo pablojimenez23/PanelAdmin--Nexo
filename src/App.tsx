@@ -101,6 +101,14 @@ type Cola = {
   maxReceiveCount: number | null;
 };
 
+type RegistroKinesis = {
+  shardId: string;
+  numeroSecuencia: string;
+  llegadaEn: string;
+  claveParticion: string;
+  datos: string;
+};
+
 const CATEGORIAS = ['TODAS', 'RESTAURANTE', 'BOTILLERIA', 'MERCADO', 'CAFETERIA'];
 const ESTADOS_TIENDA = ['TODOS', 'PENDING', 'APPROVED', 'REJECTED'];
 const ESTADOS_CONDUCTOR = ['TODOS', 'PENDIENTE_APROBACION', 'DISPONIBLE', 'OCUPADO', 'INACTIVO', 'RECHAZADO'];
@@ -219,7 +227,7 @@ function App() {
   const [passwordLogin, setPasswordLogin] = useState('');
   const [errorLogin, setErrorLogin] = useState('');
   const [cargandoLogin, setCargandoLogin] = useState(false);
-  const [vista, setVista] = useState<'tiendas' | 'cuentas' | 'conductores' | 'calificaciones' | 'estadisticas' | 'colas' | 'puntos'>('estadisticas');
+  const [vista, setVista] = useState<'tiendas' | 'cuentas' | 'conductores' | 'calificaciones' | 'estadisticas' | 'colas' | 'puntos' | 'streams'>('estadisticas');
 
   const [tiendas, setTiendas] = useState<Tienda[]>([]);
   const [duenosTiendas, setDuenosTiendas] = useState<Record<string, Usuario>>({});
@@ -267,6 +275,12 @@ function App() {
   const [resultadoPub, setResultadoPub] = useState('');
   const [errorPub, setErrorPub] = useState('');
 
+  const [streams, setStreams] = useState<string[]>([]);
+  const [streamSel, setStreamSel] = useState('');
+  const [registros, setRegistros] = useState<RegistroKinesis[]>([]);
+  const [limiteRegistros, setLimiteRegistros] = useState(10);
+  const [estadoStreams, setEstadoStreams] = useState('');
+
   const [resumenPuntos, setResumenPuntos] = useState<ResumenPuntos | null>(null);
   const [estadoPuntos, setEstadoPuntos] = useState('');
 
@@ -292,6 +306,7 @@ function App() {
     cargarColas();
     cargarTopicos();
     cargarPuntos();
+    cargarStreams();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, esAdmin]);
 
@@ -722,6 +737,58 @@ function App() {
     }
   };
 
+  // --- Streams (ms-queues / Amazon Kinesis, solo lectura) ---
+
+  const cargarRegistros = async (nombre: string, limite: number) => {
+    if (!token || !nombre) return;
+    setEstadoStreams('Cargando registros...');
+    try {
+      const res = await fetch(`${API_QUEUES}/streams/${nombre}/registros?limite=${limite}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        setRegistros([]);
+        setEstadoStreams(await mensajeError(res, 'No se pudieron leer los registros.'));
+        return;
+      }
+      const data: RegistroKinesis[] = await res.json();
+      setRegistros(data);
+      setEstadoStreams(data.length === 0 ? 'El stream no tiene registros recientes.' : '');
+    } catch {
+      setEstadoStreams('No se pudo conectar con ms-queues.');
+    }
+  };
+
+  const cargarStreams = async () => {
+    if (!token) return;
+    setEstadoStreams('Cargando...');
+    try {
+      const res = await fetch(`${API_QUEUES}/streams`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 403) {
+        setEstadoStreams('Tu cuenta no tiene rol de administrador.');
+        return;
+      }
+      if (!res.ok) {
+        setEstadoStreams(`Error al conectar con el servidor (${res.status}).`);
+        return;
+      }
+      const data: string[] = await res.json();
+      setStreams(data);
+      const elegido = streamSel && data.includes(streamSel) ? streamSel : data[0] ?? '';
+      setStreamSel(elegido);
+      if (elegido) {
+        await cargarRegistros(elegido, limiteRegistros);
+      } else {
+        setRegistros([]);
+        setEstadoStreams('No hay streams creados.');
+      }
+    } catch {
+      setEstadoStreams('No se pudo conectar con ms-queues.');
+    }
+  };
+
   const crearCola = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorNuevaCola('');
@@ -865,6 +932,22 @@ function App() {
 
   const formatoCLP = (n: number) => `$${Math.round(n).toLocaleString('es-CL')}`;
 
+  const formatearDatos = (d: string) => {
+    try {
+      return JSON.stringify(JSON.parse(d), null, 2);
+    } catch {
+      return d;
+    }
+  };
+  const nombreEvento = (d: string) => {
+    try {
+      const o = JSON.parse(d);
+      return typeof o.evento === 'string' ? o.evento : 'registro';
+    } catch {
+      return 'registro';
+    }
+  };
+
   return (
     <div className="pagina">
       <header>
@@ -925,6 +1008,12 @@ function App() {
             onClick={() => setVista('puntos')}
           >
             Puntos
+          </button>
+          <button
+            className={vista === 'streams' ? 'filtro-activo' : 'filtro'}
+            onClick={() => setVista('streams')}
+          >
+            Streams
           </button>
         </div>
 
@@ -1566,6 +1655,73 @@ function App() {
                 </p>
               </>
             )}
+          </>
+        )}
+
+        {vista === 'streams' && (
+          <>
+            <button className="btn-primario" onClick={cargarStreams}>
+              Actualizar
+            </button>
+
+            <div className="panel-controles" style={{ marginTop: 16 }}>
+              <div className="fila-control">
+                <span className="etiqueta-filtro">Stream (Amazon Kinesis)</span>
+                <select
+                  className="busqueda"
+                  value={streamSel}
+                  onChange={(e) => {
+                    setStreamSel(e.target.value);
+                    cargarRegistros(e.target.value, limiteRegistros);
+                  }}
+                >
+                  {streams.length === 0 && <option value="">Sin streams</option>}
+                  {streams.map((nombre) => (
+                    <option key={nombre} value={nombre}>{nombre}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="fila-control">
+                <span className="etiqueta-filtro">Registros a mostrar</span>
+                <div className="filtros">
+                  {[10, 25, 50].map((n) => (
+                    <button
+                      key={n}
+                      className={limiteRegistros === n ? 'filtro-activo' : 'filtro'}
+                      onClick={() => {
+                        setLimiteRegistros(n);
+                        cargarRegistros(streamSel, n);
+                      }}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="fecha" style={{ marginTop: 8 }}>
+                Cada cambio de estado de un pedido se publica en este stream. Vista de solo lectura.
+              </p>
+            </div>
+
+            <div className="estado">
+              {estadoStreams || (registros.length > 0 && `${registros.length} registros`)}
+            </div>
+
+            {registros.map((r) => (
+              <div className="tarjeta" key={`${r.shardId}-${r.numeroSecuencia}`}>
+                <div className="tarjeta-header">
+                  <h3>{nombreEvento(r.datos)}</h3>
+                  <span className="etiqueta-estado etiqueta-approved">{r.shardId}</span>
+                </div>
+                <p>Llegada: {new Date(r.llegadaEn).toLocaleString('es-CL')}</p>
+                <p>Pedido (clave de partición): {r.claveParticion}</p>
+                <div className="caja-motivo">
+                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, margin: 0 }}>
+                    {formatearDatos(r.datos)}
+                  </pre>
+                </div>
+              </div>
+            ))}
           </>
         )}
       </main>
