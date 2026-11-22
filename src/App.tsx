@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { decodificarToken } from './auth';
 import './App.css';
 
-const ALB_HOST = 'http://nexo-alb-306620137.us-east-1.elb.amazonaws.com';
+const ALB_HOST = 'http://nexo-alb-1370249593.us-east-1.elb.amazonaws.com';
 const API_STORES = `${ALB_HOST}/stores`;
 const API_USERS = ALB_HOST;
 const API_ORDERS = `${ALB_HOST}/orders`;
@@ -1561,7 +1561,7 @@ function App() {
                 </div>
 
                 <p className="fecha" style={{ margin: '16px 0' }}>
-                  Regla: 1 punto por cada $100 de un pedido completado. 1 punto equivale a{' '}
+                  Regla: 1 punto por cada $1.000 de un pedido completado. 1 punto equivale a{' '}
                   {formatoCLP(resumenPuntos.pesosPorPunto)} al canjearlo.
                 </p>
               </>
