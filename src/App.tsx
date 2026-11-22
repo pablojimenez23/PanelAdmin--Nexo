@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
-import { iniciarLoginGoogle, intercambiarCodigoPorToken, decodificarToken } from './auth';
+import { decodificarToken } from './auth';
 import './App.css';
 
-const API_STORES = 'http://localhost:8082';
-const API_USERS = 'http://localhost:8081';
-const API_ORDERS = 'http://localhost:8084';
+const ALB_HOST = 'http://nexo-alb-306620137.us-east-1.elb.amazonaws.com';
+const API_STORES = `${ALB_HOST}/stores`;
+const API_USERS = ALB_HOST;
+const API_ORDERS = `${ALB_HOST}/orders`;
+const API_QUEUES = `${ALB_HOST}/messaging`;
 
 type Tienda = {
   id: string;
@@ -63,6 +65,40 @@ type Estadisticas = {
   pedidosCancelados: number;
   ventasTotales: number;
   comisionTotal: number;
+};
+
+type ResumenPuntos = {
+  puntosEmitidos: number;
+  puntosCanjeados: number;
+  puntosDevueltos: number;
+  puntosVigentes: number;
+  pesosPorPunto: number;
+  clientesConPuntos: number;
+};
+
+type MensajeCola = {
+  messageId: string;
+  body: string;
+  receiveCount: number;
+  atributos: Record<string, string> | null;
+};
+
+type Topico = {
+  name: string;
+  arn: string;
+  suscripciones: { queue: string; eventos: string[] }[];
+};
+
+type Cola = {
+  name: string;
+  url: string;
+  arn: string;
+  mensajesDisponibles: number;
+  mensajesEnProceso: number;
+  visibilityTimeoutSeconds: number;
+  retentionSeconds: number;
+  dlqArn: string | null;
+  maxReceiveCount: number | null;
 };
 
 const CATEGORIAS = ['TODAS', 'RESTAURANTE', 'BOTILLERIA', 'MERCADO', 'CAFETERIA'];
@@ -179,7 +215,11 @@ function App() {
   const [cargandoAuth, setCargandoAuth] = useState(true);
   const [esAdmin, setEsAdmin] = useState(false);
   const [nombreUsuario, setNombreUsuario] = useState<string | null>(null);
-  const [vista, setVista] = useState<'tiendas' | 'cuentas' | 'conductores' | 'calificaciones' | 'estadisticas'>('estadisticas');
+  const [emailLogin, setEmailLogin] = useState('');
+  const [passwordLogin, setPasswordLogin] = useState('');
+  const [errorLogin, setErrorLogin] = useState('');
+  const [cargandoLogin, setCargandoLogin] = useState(false);
+  const [vista, setVista] = useState<'tiendas' | 'cuentas' | 'conductores' | 'calificaciones' | 'estadisticas' | 'colas' | 'puntos'>('estadisticas');
 
   const [tiendas, setTiendas] = useState<Tienda[]>([]);
   const [duenosTiendas, setDuenosTiendas] = useState<Record<string, Usuario>>({});
@@ -213,39 +253,32 @@ function App() {
   const [estadisticas, setEstadisticas] = useState<Estadisticas | null>(null);
   const [estadoEstadisticas, setEstadoEstadisticas] = useState('');
 
-  useEffect(() => {
-    const procesarLogin = async () => {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get('code');
+  const [colas, setColas] = useState<Cola[]>([]);
+  const [estadoColas, setEstadoColas] = useState('');
+  const [nombreNuevaCola, setNombreNuevaCola] = useState('');
+  const [errorNuevaCola, setErrorNuevaCola] = useState('');
+  const [colaAbierta, setColaAbierta] = useState<string | null>(null);
+  const [mensajesCola, setMensajesCola] = useState<MensajeCola[]>([]);
+  const [estadoMensajes, setEstadoMensajes] = useState('');
+  const [topicos, setTopicos] = useState<Topico[]>([]);
+  const [topicoSel, setTopicoSel] = useState('');
+  const [eventoPub, setEventoPub] = useState('');
+  const [mensajePub, setMensajePub] = useState('');
+  const [resultadoPub, setResultadoPub] = useState('');
+  const [errorPub, setErrorPub] = useState('');
 
-      if (code && !sessionStorage.getItem('code_procesado')) {
-        sessionStorage.setItem('code_procesado', code);
-        const nuevoToken = await intercambiarCodigoPorToken(code);
-        if (nuevoToken) {
-          sessionStorage.setItem('nexo_admin_token', nuevoToken);
-          setToken(nuevoToken);
-        }
-        window.history.replaceState({}, '', '/');
-      }
-      setCargandoAuth(false);
-    };
-    procesarLogin();
+  const [resumenPuntos, setResumenPuntos] = useState<ResumenPuntos | null>(null);
+  const [estadoPuntos, setEstadoPuntos] = useState('');
+
+  useEffect(() => {
+    setCargandoAuth(false);
   }, []);
 
   useEffect(() => {
     if (token) {
       const payload = decodificarToken(token);
-      setEsAdmin((payload['cognito:groups'] || []).includes('ADMIN'));
-
-      fetch(`${API_USERS}/usuarios/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data?.nombre) setNombreUsuario(data.nombre);
-          else setNombreUsuario(payload['email'] || null);
-        })
-        .catch(() => setNombreUsuario(payload['email'] || null));
+      setEsAdmin((payload['cognito:groups'] || []).some((g) => g.toLowerCase() === 'admin'));
+      setNombreUsuario(payload['name'] || payload['email'] || null);
     }
   }, [token]);
 
@@ -256,14 +289,45 @@ function App() {
     cargarConductores();
     cargarCalificaciones();
     cargarEstadisticas();
+    cargarColas();
+    cargarTopicos();
+    cargarPuntos();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, esAdmin]);
 
+  const iniciarSesion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorLogin('');
+    setCargandoLogin(true);
+
+    try {
+      const res = await fetch(`${API_USERS}/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailLogin, password: passwordLogin }),
+      });
+
+      if (!res.ok) {
+        setErrorLogin('Email o contraseña incorrectos.');
+        setCargandoLogin(false);
+        return;
+      }
+
+      const data = await res.json();
+      sessionStorage.setItem('nexo_admin_token', data.idToken);
+      setToken(data.idToken);
+    } catch {
+      setErrorLogin('No se pudo conectar con el servidor.');
+    } finally {
+      setCargandoLogin(false);
+    }
+  };
+
   const cerrarSesion = () => {
     sessionStorage.removeItem('nexo_admin_token');
-    sessionStorage.removeItem('code_procesado');
     setToken(null);
     setEsAdmin(false);
+    setNombreUsuario(null);
   };
 
   const cargarUsuariosPorIds = async (ids: string[]): Promise<Record<string, Usuario>> => {
@@ -312,7 +376,7 @@ function App() {
       const duenos = await cargarUsuariosPorIds(data.map((t) => t.ownerId));
       setDuenosTiendas(duenos);
     } catch {
-      setEstadoTiendas('No se pudo conectar con ms-stores. ¿Está corriendo en el puerto 8082?');
+      setEstadoTiendas('No se pudo conectar con ms-stores.');
     }
   };
 
@@ -382,7 +446,7 @@ function App() {
       setUsuarios(await res.json());
       setEstadoUsuarios('');
     } catch {
-      setEstadoUsuarios('No se pudo conectar con ms-users. ¿Está corriendo en el puerto 8081?');
+      setEstadoUsuarios('No se pudo conectar con ms-users.');
     }
   };
 
@@ -434,7 +498,7 @@ function App() {
       const usuariosMap = await cargarUsuariosPorIds(data.map((c) => c.usuarioId));
       setUsuariosConductores(usuariosMap);
     } catch {
-      setEstadoConductores('No se pudo conectar con ms-users. ¿Está corriendo en el puerto 8081?');
+      setEstadoConductores('No se pudo conectar con ms-users.');
     }
   };
 
@@ -516,8 +580,192 @@ function App() {
       setEstadisticas(await res.json());
       setEstadoEstadisticas('');
     } catch {
-      setEstadoEstadisticas('No se pudo conectar con ms-orders. ¿Está corriendo en el puerto 8084?');
+      setEstadoEstadisticas('No se pudo conectar con ms-orders.');
     }
+  };
+
+  // --- Colas (ms-queues / Amazon SQS) ---
+
+  const mensajeError = async (res: Response, porDefecto: string): Promise<string> => {
+    try {
+      const data = await res.json();
+      if (data.detalle) return Object.values(data.detalle as Record<string, string>).join(' · ');
+      if (data.error) return data.error as string;
+    } catch {
+      // respuesta sin cuerpo JSON
+    }
+    return porDefecto;
+  };
+
+  const cargarColas = async () => {
+    if (!token) return;
+    setEstadoColas('Cargando...');
+    try {
+      const res = await fetch(`${API_QUEUES}/queues`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 403) {
+        setEstadoColas('Tu cuenta no tiene rol de administrador.');
+        return;
+      }
+      if (!res.ok) {
+        setEstadoColas(`Error al conectar con el servidor (${res.status}).`);
+        return;
+      }
+      setColas(await res.json());
+      setEstadoColas('');
+    } catch {
+      setEstadoColas('No se pudo conectar con ms-queues.');
+    }
+  };
+
+  const cargarTopicos = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_QUEUES}/topics`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) return;
+      const data: Topico[] = await res.json();
+      setTopicos(data);
+      if (data.length > 0) setTopicoSel((actual) => actual || data[0].name);
+    } catch {
+      // el formulario de publicación simplemente queda vacío
+    }
+  };
+
+  const verMensajes = async (nombre: string) => {
+    if (colaAbierta === nombre) {
+      setColaAbierta(null);
+      return;
+    }
+    setColaAbierta(nombre);
+    setMensajesCola([]);
+    setEstadoMensajes('Cargando...');
+    try {
+      const res = await fetch(`${API_QUEUES}/queues/${nombre}/messages?max=10`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        setEstadoMensajes(await mensajeError(res, 'No se pudieron leer los mensajes.'));
+        return;
+      }
+      const data: MensajeCola[] = await res.json();
+      setMensajesCola(data);
+      setEstadoMensajes(data.length === 0 ? 'La cola no tiene mensajes visibles.' : '');
+    } catch {
+      setEstadoMensajes('No se pudo conectar con ms-queues.');
+    }
+  };
+
+  const reencolar = async (nombre: string) => {
+    const confirmado = window.confirm(`¿Reenviar los mensajes de "${nombre}" a su cola de origen?`);
+    if (!confirmado) return;
+    const res = await fetch(`${API_QUEUES}/queues/${nombre}/redrive`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) {
+      alert('Reenvío iniciado. Actualizá el listado en unos segundos.');
+      cargarColas();
+    } else {
+      alert(await mensajeError(res, 'No se pudo iniciar el reenvío.'));
+    }
+  };
+
+  const publicarEvento = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorPub('');
+    setResultadoPub('');
+    try {
+      const res = await fetch(`${API_QUEUES}/topics/${topicoSel}/publish`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ evento: eventoPub.trim(), mensaje: mensajePub }),
+      });
+      if (!res.ok) {
+        setErrorPub(await mensajeError(res, 'No se pudo publicar el evento.'));
+        return;
+      }
+      const data: { colasDestino: string[] } = await res.json();
+      setResultadoPub(
+        data.colasDestino.length > 0
+          ? `Entregado a: ${data.colasDestino.join(', ')}`
+          : 'Publicado, pero ninguna cola está suscrita a ese evento.'
+      );
+      cargarColas();
+    } catch {
+      setErrorPub('No se pudo conectar con ms-queues.');
+    }
+  };
+
+  // --- Puntos de fidelización ---
+
+  const cargarPuntos = async () => {
+    if (!token) return;
+    setEstadoPuntos('Cargando...');
+    try {
+      const res = await fetch(`${API_USERS}/puntos/admin/resumen`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 403) {
+        setEstadoPuntos('Tu cuenta no tiene rol de administrador.');
+        return;
+      }
+      if (!res.ok) {
+        setEstadoPuntos(`Error al conectar con el servidor (${res.status}).`);
+        return;
+      }
+      const data: ResumenPuntos = await res.json();
+      setResumenPuntos(data);
+      setEstadoPuntos('');
+    } catch {
+      setEstadoPuntos('No se pudo conectar con ms-users.');
+    }
+  };
+
+  const crearCola = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorNuevaCola('');
+    try {
+      const res = await fetch(`${API_QUEUES}/queues`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: nombreNuevaCola.trim() }),
+      });
+      if (res.ok) {
+        setNombreNuevaCola('');
+        cargarColas();
+      } else {
+        setErrorNuevaCola(await mensajeError(res, 'No se pudo crear la cola.'));
+      }
+    } catch {
+      setErrorNuevaCola('No se pudo conectar con ms-queues.');
+    }
+  };
+
+  const vaciarCola = async (nombre: string) => {
+    const confirmado = window.confirm(`¿Vaciar todos los mensajes de "${nombre}"? No se puede deshacer.`);
+    if (!confirmado) return;
+    const res = await fetch(`${API_QUEUES}/queues/${nombre}/purge`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) cargarColas();
+    else alert(await mensajeError(res, 'No se pudo vaciar la cola. SQS solo permite vaciar una cola cada 60 segundos.'));
+  };
+
+  const eliminarCola = async (nombre: string, tieneDlq: boolean) => {
+    const confirmado = window.confirm(
+      tieneDlq
+        ? `¿Eliminar "${nombre}" y su cola de errores (DLQ)? Se pierden los mensajes pendientes.`
+        : `¿Eliminar "${nombre}"? Se pierden los mensajes pendientes.`
+    );
+    if (!confirmado) return;
+    const res = await fetch(`${API_QUEUES}/queues/${nombre}?withDlq=${tieneDlq}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) cargarColas();
+    else alert(await mensajeError(res, 'No se pudo eliminar la cola.'));
   };
 
   if (cargandoAuth) {
@@ -530,9 +778,28 @@ function App() {
         <img src="/logonexo.jpg" alt="NEXO" className="logo-login" />
         <h1>NEXO</h1>
         <p className="sub">Panel de administración</p>
-        <button className="btn-primario" onClick={iniciarLoginGoogle}>
-          Iniciar sesión con Google
-        </button>
+        <form onSubmit={iniciarSesion} style={{ width: '100%', maxWidth: 320, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <input
+            type="email"
+            placeholder="Email"
+            value={emailLogin}
+            onChange={(e) => setEmailLogin(e.target.value)}
+            required
+            className="busqueda"
+          />
+          <input
+            type="password"
+            placeholder="Contraseña"
+            value={passwordLogin}
+            onChange={(e) => setPasswordLogin(e.target.value)}
+            required
+            className="busqueda"
+          />
+          {errorLogin && <p style={{ color: '#c0392b', fontSize: 13, margin: 0 }}>{errorLogin}</p>}
+          <button className="btn-primario" type="submit" disabled={cargandoLogin}>
+            {cargandoLogin ? 'Ingresando...' : 'Iniciar sesión'}
+          </button>
+        </form>
       </div>
     );
   }
@@ -646,6 +913,18 @@ function App() {
             onClick={() => setVista('calificaciones')}
           >
             Calificaciones
+          </button>
+          <button
+            className={vista === 'colas' ? 'filtro-activo' : 'filtro'}
+            onClick={() => setVista('colas')}
+          >
+            Colas
+          </button>
+          <button
+            className={vista === 'puntos' ? 'filtro-activo' : 'filtro'}
+            onClick={() => setVista('puntos')}
+          >
+            Puntos
           </button>
         </div>
 
@@ -1102,6 +1381,190 @@ function App() {
                   </div>
                 );
               })
+            )}
+          </>
+        )}
+        {vista === 'colas' && (
+          <>
+            <button className="btn-primario" onClick={cargarColas}>
+              Actualizar listado
+            </button>
+
+            <form onSubmit={crearCola} className="panel-controles" style={{ marginTop: 16 }}>
+              <div className="fila-control">
+                <span className="etiqueta-filtro">Nueva cola</span>
+                <input
+                  className="busqueda"
+                  type="text"
+                  placeholder="nexo-nombre-de-la-cola"
+                  value={nombreNuevaCola}
+                  onChange={(e) => setNombreNuevaCola(e.target.value)}
+                  required
+                />
+                <button className="btn-aprobar" type="submit">Crear</button>
+              </div>
+              {errorNuevaCola && (
+                <p style={{ color: '#c0392b', fontSize: 13, margin: '8px 0 0' }}>{errorNuevaCola}</p>
+              )}
+              <p className="fecha" style={{ marginTop: 8 }}>
+                Se crea junto con su cola de errores (DLQ) y 3 reintentos por defecto.
+              </p>
+            </form>
+
+            <div className="estado">
+              {estadoColas || (colas.length > 0 && `${colas.length} colas`)}
+            </div>
+
+            {colas.length === 0 && !estadoColas && (
+              <div className="vacio">No hay colas creadas.</div>
+            )}
+
+            {colas.map((cola) => {
+              const esDlq = cola.name.endsWith('-dlq');
+              const nombreDlq = cola.dlqArn ? cola.dlqArn.substring(cola.dlqArn.lastIndexOf(':') + 1) : null;
+              return (
+                <div className="tarjeta" key={cola.name}>
+                  <div className="tarjeta-header">
+                    <h3>{cola.name}</h3>
+                    <span className={`etiqueta-estado ${esDlq ? 'etiqueta-rejected' : 'etiqueta-approved'}`}>
+                      {esDlq ? 'DLQ' : 'COLA'}
+                    </span>
+                  </div>
+                  <p>Mensajes disponibles: <strong>{cola.mensajesDisponibles}</strong></p>
+                  <p>En proceso: {cola.mensajesEnProceso}</p>
+                  <p>Visibilidad: {cola.visibilityTimeoutSeconds} s · Retención: {Math.round(cola.retentionSeconds / 86400)} días</p>
+                  {nombreDlq && (
+                    <p>Cola de errores: {nombreDlq} (se envía tras {cola.maxReceiveCount} intentos fallidos)</p>
+                  )}
+
+                  <div className="acciones">
+                    <button className="btn-primario" onClick={() => verMensajes(cola.name)}>
+                      {colaAbierta === cola.name ? 'Ocultar mensajes' : 'Ver mensajes'}
+                    </button>
+                    {esDlq && (
+                      <button className="btn-aprobar" onClick={() => reencolar(cola.name)}>
+                        Reencolar
+                      </button>
+                    )}
+                    <button className="btn-rechazar" onClick={() => vaciarCola(cola.name)}>
+                      Vaciar
+                    </button>
+                    <button className="btn-eliminar" onClick={() => eliminarCola(cola.name, !!nombreDlq)}>
+                      Eliminar
+                    </button>
+                  </div>
+
+                  {colaAbierta === cola.name && (
+                    <div className="caja-motivo">
+                      <p className="fecha">Vista previa: los mensajes no se consumen.</p>
+                      {estadoMensajes && <p>{estadoMensajes}</p>}
+                      {mensajesCola.map((m) => (
+                        <div key={m.messageId} style={{ marginTop: 8 }}>
+                          <p className="fecha">
+                            {m.messageId} · recibido {m.receiveCount} {m.receiveCount === 1 ? 'vez' : 'veces'}
+                          </p>
+                          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, margin: 0 }}>
+                            {m.body}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <form onSubmit={publicarEvento} className="panel-controles" style={{ marginTop: 24 }}>
+              <div className="fila-control">
+                <span className="etiqueta-filtro">Publicar evento de prueba</span>
+              </div>
+              <div className="fila-control">
+                <span className="etiqueta-filtro">Topic</span>
+                <select className="busqueda" value={topicoSel} onChange={(e) => setTopicoSel(e.target.value)} required>
+                  {topicos.length === 0 && <option value="">Sin topics</option>}
+                  {topicos.map((t) => (
+                    <option key={t.name} value={t.name}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="fila-control">
+                <span className="etiqueta-filtro">Evento</span>
+                <input
+                  className="busqueda"
+                  type="text"
+                  placeholder="pedido.completado"
+                  value={eventoPub}
+                  onChange={(e) => setEventoPub(e.target.value)}
+                  required
+                />
+              </div>
+              <textarea
+                className="busqueda"
+                placeholder='Mensaje (JSON), por ejemplo {"pedidoId":"..."}'
+                value={mensajePub}
+                onChange={(e) => setMensajePub(e.target.value)}
+                rows={4}
+                required
+              />
+              <button className="btn-aprobar" type="submit" disabled={!topicoSel}>Publicar</button>
+              {resultadoPub && <p style={{ color: '#27ae60', fontSize: 13, margin: '8px 0 0' }}>{resultadoPub}</p>}
+              {errorPub && <p style={{ color: '#c0392b', fontSize: 13, margin: '8px 0 0' }}>{errorPub}</p>}
+              <p className="fecha" style={{ marginTop: 8 }}>
+                Un mensaje que no cumpla el formato esperado irá a la DLQ tras los reintentos.
+              </p>
+            </form>
+          </>
+        )}
+
+        {vista === 'puntos' && (
+          <>
+            <button className="btn-primario" onClick={cargarPuntos}>
+              Actualizar
+            </button>
+            <div className="estado">{estadoPuntos}</div>
+
+            {resumenPuntos && (
+              <>
+                <div className="grid-stats">
+                  <div className="stat-card stat-card-destacada">
+                    <div className="stat-icono-wrapper"><IconoMonedas /></div>
+                    <span className="stat-valor">{resumenPuntos.puntosEmitidos.toLocaleString('es-CL')}</span>
+                    <span className="stat-label">Puntos emitidos</span>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-icono-wrapper"><IconoCheck /></div>
+                    <span className="stat-valor">{resumenPuntos.puntosCanjeados.toLocaleString('es-CL')}</span>
+                    <span className="stat-label">Puntos canjeados</span>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-icono-wrapper"><IconoX /></div>
+                    <span className="stat-valor">{resumenPuntos.puntosDevueltos.toLocaleString('es-CL')}</span>
+                    <span className="stat-label">Devueltos por cancelación</span>
+                  </div>
+                  <div className="stat-card stat-card-destacada">
+                    <div className="stat-icono-wrapper"><IconoBanco /></div>
+                    <span className="stat-valor">{resumenPuntos.puntosVigentes.toLocaleString('es-CL')}</span>
+                    <span className="stat-label">Puntos vigentes</span>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-icono-wrapper"><IconoMonedas /></div>
+                    <span className="stat-valor">
+                      {formatoCLP(resumenPuntos.puntosVigentes * resumenPuntos.pesosPorPunto)}
+                    </span>
+                    <span className="stat-label">Pasivo máximo (si todo se canjea)</span>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-icono-wrapper"><IconoUsuarios /></div>
+                    <span className="stat-valor">{resumenPuntos.clientesConPuntos}</span>
+                    <span className="stat-label">Clientes con puntos</span>
+                  </div>
+                </div>
+
+                <p className="fecha" style={{ margin: '16px 0' }}>
+                  Regla: 1 punto por cada $100 de un pedido completado. 1 punto equivale a{' '}
+                  {formatoCLP(resumenPuntos.pesosPorPunto)} al canjearlo.
+                </p>
+              </>
             )}
           </>
         )}
