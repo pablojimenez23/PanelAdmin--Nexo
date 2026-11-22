@@ -1,75 +1,53 @@
-# React + TypeScript + Vite
+# NEXO · Panel de administración
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Panel web para administradores de **NEXO** (marketplace de delivery). Permite moderar tiendas, cuentas y conductores, revisar calificaciones y estadísticas, gestionar colas/tópicos de mensajería, ver el programa de puntos y **leer en vivo los eventos de pedidos que llegan a Amazon Kinesis**.
 
-Currently, two official plugins are available:
+Proyecto del ramo DSY1107 (Duoc UC) · Autores: Pablo Jiménez y Juan Vargas · Docente: Javier Peña.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## 1. Stack
 
-## React Compiler
+- Vite + React + TypeScript (un solo componente principal `src/App.tsx`, estilos en `src/App.css`).
+- Autenticación: `POST {ALB}/admin/login` (Amazon Cognito detrás de ms-users). El token se guarda en `sessionStorage` (`nexo_admin_token`) y solo entran cuentas del grupo `admin` de Cognito.
+- Backend: 5 microservicios Spring Boot en AWS ECS Fargate detrás de un Application Load Balancer. Repositorio: https://github.com/pablojimenez23/Backend---Nexo
+- App móvil (React Native/Expo): https://github.com/pablojimenez23/Frontend---nexo
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 2. Secciones del panel
 
-## Expanding the ESLint configuration
+| Sección | Qué hace | Servicio |
+|---|---|---|
+| Estadísticas | Resumen de usuarios, tiendas, pedidos | ms-users, ms-stores, ms-orders |
+| Tiendas | Aprobar, rechazar y eliminar tiendas | ms-stores |
+| Cuentas | Gestión de usuarios | ms-users |
+| Conductores | Aprobación de conductores | ms-users |
+| Calificaciones | Revisión de calificaciones | ms-orders |
+| Colas | Colas SQS y tópicos SNS (V2) | ms-queues |
+| Puntos | Resumen del programa de puntos: 1 punto por cada $1.000 (V2) | ms-orders |
+| **Streams** | Lista streams de Kinesis y muestra los últimos 10/25/50 registros con su JSON (V3) | ms-queues |
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## 3. Ejecutar en local
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+    npm install
+    npm run dev
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Abre http://localhost:5173 e inicia sesión con una cuenta del grupo `admin`. El panel llama al ALB configurado en la constante `ALB_HOST` de `src/App.tsx`.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## 4. Build y publicación
 
-```
+    npm run build
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+El contenido de `dist/` se publica como sitio estático en un bucket S3 (hosting de sitio web).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## 5. Versiones y ramas
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Rama / tag | Commit | Fecha | Contenido |
+|---|---|---|---|
+| `rama-1-base` · `v1.0.0` | 9a1f5dc | 5 sep 2026 | Panel base: tiendas, cuentas, conductores, calificaciones, estadísticas |
+| `rama-2-sns-sqs` · `v2.0.0` | 433b8e6 | 21 oct 2026 | Colas, tópicos y puntos |
+| `rama-3-kinesis` · `v3.0.0` | 43abf3a | 22 nov 2026 | ALB nuevo, regla de puntos corregida y pestaña Streams (Kinesis) |
 
-```
+Flujo: rama de versión → `staging` → `main` (merge `--no-ff` + tag). `develop` es la rama de trabajo y hoy coincide con `rama-3-kinesis`. No se reescribió historia ni se hizo force-push; los commits de merge de release son del 22 nov 2026.
+
+## 6. Seguridad
+
+- El panel no contiene credenciales: el usuario inicia sesión y el backend valida el token y el grupo `admin`.
+- Las rutas de Streams son de solo lectura y exclusivas para administradores.
